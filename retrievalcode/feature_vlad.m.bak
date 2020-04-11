@@ -1,0 +1,117 @@
+clear;
+%clc;
+
+addpath('vlfeat-0.9.21/toolbox');
+run('vl_setup');
+
+TRAIN=0;
+local_feature_dim=128;
+global_feature_dim=2048;
+clusters_num=64;
+db_type='Copydays';
+work_dir = fullfile('features', db_type, 'feature_pretrain');
+save_dir = fullfile(work_dir, 'feat');
+pca_data_dir =fullfile(work_dir, 'pca_dat');
+if TRAIN
+    name='feat_db_resnext101_1.h5';
+else
+    name='feat_query_resnext101_1.h5';
+end    
+feature_file=fullfile(work_dir, name)
+features=h5read(feature_file,'/mats_conv4'); %14x14x1024x3055
+name_list=h5read(feature_file,'/name_list');
+[W,H,feat_dim,img_num] = size(features);
+features=permute(features,[4,1,2,3]);
+features=reshape(features, [], feat_dim);
+% features=reshape(features, img_num, [], feat_dim);
+% features=squeeze(max(features,[],2));
+if ~TRAIN
+    D=load(fullfile(pca_data_dir, 'conv4_data.mat'));
+end
+
+%PCA and Whiting
+disp('performing PCA local feature dim reduction');
+if TRAIN
+    mean_local=mean(features,1);
+    features= bsxfun(@minus, features, mean_local);
+    [coeff_local,~,latent_local]=pca(features,'NumComponents',local_feature_dim);
+    %tmp=cumsum(latent)./sum(latent);
+    %disp(tmp(1:128:end))
+else
+   coeff_local=D.coeff_local;
+   latent_local=D.latent_local;
+   features= bsxfun(@minus, features, D.mean_local);
+end
+features=features*coeff_local;
+for i=1:size(features,2)
+    features(:,i)=features(:,i) / (sqrt(latent_local(i) + 1e-9));
+end
+for i=1:img_num
+   features(i)=features(i) / (norm(features(i),2) + 1e-9);
+end
+
+if TRAIN
+    opts = statset('Display','final', 'MaxIter',1000);
+    [~, centers]=kmeans(features, clusters_num,'Options',opts);
+else
+    centers=D.centers;
+end
+
+centers = double(centers');
+features = double(features');
+% for i=1:size(features,2)
+%     features(:,i)=features(:,i) / (norm(features(:,i),2) + 1e-5);
+% end
+% if TRAIN
+%     centers = vl_kmeans(features, clusters_num,'verbose','Initialization', 'plusplus');
+% else
+%     centers = D.centers;
+% end
+kdtree = vl_kdtreebuild(centers);
+features=reshape(features,local_feature_dim,H*W,img_num);
+
+disp('VLAD encoding');
+dataset_features=zeros(local_feature_dim * clusters_num, img_num);
+for i=1:img_num
+    nn = vl_kdtreequery(kdtree, centers, features(:,:,i));
+    %tmp = tabulate(nn);
+    %dataset_features(:,i)=tmp(:,2);
+    assignments = zeros(clusters_num, size(features,2));
+    assignments(sub2ind(size(assignments), nn, 1:length(nn))) = 1;
+    dataset_features(:,i) = vl_vlad(features(:,:,i),centers,assignments,'NormalizeComponents');%Already L2 Normalized
+end
+dataset_features=single(dataset_features');
+centers=single(centers');
+%PCA and Whiting
+% disp('performing PCA global feature dim reduction');
+% if TRAIN
+%     mean_global=mean(dataset_features,1);
+%     dataset_features= bsxfun(@minus, dataset_features, mean_global);
+%     [coeff_global,~,latent]=pca(dataset_features,'NumComponents',global_feature_dim);
+%     tmp=cumsum(latent)./sum(latent);
+%     disp(tmp(1:512:end))
+% else
+%     coeff_global=D.coeff_global;
+%     dataset_features= bsxfun(@minus, dataset_features, D.mean_global);
+% end
+% dataset_features=dataset_features*coeff_global;
+
+%L2 Normalized
+%for i=1:img_num
+%    dataset_features(i)=dataset_features(i) / (norm(dataset_features(i),2) + 1e-9);
+%end
+if TRAIN
+    stage='db';
+else
+    stage='query';
+end
+save_file_name=fullfile(save_dir,sprintf('CONV4_%s_cluster_%d.mat', stage, clusters_num))
+%h5create(save_file_name, '/dataset_features',size(dataset_features),'Datatype','single');
+%h5create(save_file_name, '/name_list',[size(name_list), length(name_list{1})],'Datatype','uint8');
+%h5write(save_file_name, '/dataset_features', dataset_features);
+%h5write(save_file_name, '/name_list', name_list);
+save(save_file_name,'dataset_features','name_list');
+if TRAIN
+    save(fullfile(pca_data_dir, 'conv4_data.mat'),'centers','mean_local','coeff_local','latent_local');
+end
+disp('all is done!');
